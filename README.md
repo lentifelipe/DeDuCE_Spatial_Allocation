@@ -16,10 +16,10 @@ A comprehensive R/rgee system for attributing forest loss to specific commoditie
 
 | Script | Purpose | Output |
 |--------|---------|-------|
-| `DeDuCE_integrate_attribution_layers_Global_Countries.R` | Global attribution (all countries) | REGION_CONFIG | GEE asset |
-| `DeDuCE_integrate_attribution_layers_BR_States.R` | Brazil attribution (all states) | REGION_CONFIG | GEE asset |
-| `DeDuCE_export_spatial_allocation_areas_Global_Countries.R` | Calculate areas (Countries) | Local asset | CSV: area ~ commodity × year x territorry |
-| `DeDuCE_export_spatial_allocation_areas_BR_States.R` | Calculate areas (Brazil states) | Local asset | CSV: area ~ commodity × year x territorry |
+| `DeDuCE_integrate_attribution_layers_Global_Countries.R` | Global attribution (all countries) | GEE asset |
+| `DeDuCE_integrate_attribution_layers_BR_States.R` | Brazil attribution (all states) | GEE asset |
+| `DeDuCE_export_spatial_allocation_areas_Global_Countries.R` | Calculate areas (Countries) | CSV: area ~ commodity × year x territorry |
+| `DeDuCE_export_spatial_allocation_areas_BR_States.R` | Calculate areas (Brazil states) | CSV: area ~ commodity × year x territorry |
 
 ### Workflow
 
