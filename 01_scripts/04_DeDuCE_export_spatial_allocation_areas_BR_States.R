@@ -1,0 +1,243 @@
+# ============================================================================
+# Exports area statistics from GEE integration asset to CSV
+# Format: Long format with years as columns (state × commodity rows)
+# Scope: All Brazil states
+# ============================================================================
+
+library(rgee)
+library(tidyverse)
+library(dplyr)
+library(purrr)
+library(sf)
+library(readr)
+
+# ============================================================================
+# SECTION 0: CONFIGURATION
+# ============================================================================
+
+# State name to code mapping (for all Brazil states)
+STATE_NAME_MAPPING <- list(
+  "Acre" = 1, "Alagoas" = 2, "Amapá" = 3, "Amazonas" = 4, "Bahia" = 5,
+  "Ceará" = 6, "Distrito Federal" = 7, "Espírito Santo" = 8, "Goiás" = 9,
+  "Maranhão" = 10, "Mato Grosso do Sul" = 11, "Mato Grosso" = 12,
+  "Minas Gerais" = 13, "Pará" = 14, "Paraíba" = 15, "Paraná" = 16,
+  "Pernambuco" = 17, "Piauí" = 18, "Rio de Janeiro" = 19,
+  "Rio Grande do Norte" = 20, "Rio Grande do Sul" = 21, "Rondônia" = 22,
+  "Roraima" = 23, "Santa Catarina" = 24, "São Paulo" = 25, "Sergipe" = 26,
+  "Tocantins" = 27
+)
+
+# State code to name reverse mapping
+STATE_CODE_TO_NAME <- setNames(names(STATE_NAME_MAPPING), unlist(STATE_NAME_MAPPING))
+
+# GEE Assets configuration
+GEE_ASSETS <- list(
+  hansen = 'UMD/hansen/global_forest_change_2024_v1_12',
+  #Change later to Brazil instead of example State
+  integrated_classification = 'projects/trase/DeDuCE/Integration/DeDuCE_Integration_Brazil_Espirito_Santo',
+  brazil_states_raster = 'projects/trase/DeDuCE/Admin/Brazil_States_Territory_30m'
+)
+
+# Output configuration
+OUTPUT_DIR <- "./DeDuCE_exports"
+OUTPUT_FILENAME <- "DeDuCE_area_statistics_by_state_commodity_year.csv"
+
+# ============================================================================
+# SECTION 1: INITIALIZE GEE
+# ============================================================================
+
+# Uncomment to initialize GEE (if not already initialized)
+# ee_Initialize()
+
+cat("GEE initialization assumed complete\n\n")
+
+# ============================================================================
+# SECTION 2: LOAD GEE ASSETS
+# ============================================================================
+
+cat("Loading GEE assets...\n")
+
+hansen <- ee$Image(GEE_ASSETS$hansen)
+hansen_lossyear <- hansen$select('lossyear')
+hansen_loss_attribution <- ee$Image(GEE_ASSETS$integrated_classification)
+brazil_states_raster <- ee$Image(GEE_ASSETS$brazil_states_raster)
+
+hansen_projection <- hansen_lossyear$projection()
+hansen_scale <- hansen_projection$nominalScale()
+
+cat("GEE assets loaded successfully\n\n")
+
+# ============================================================================
+# SECTION 3: PREPARE DATA FOR GROUPED REDUCTION (ALL STATES)
+# ============================================================================
+
+cat("Preparing data for grouped reduction across all Brazil states...\n")
+
+# Get Brazil boundary
+gaul_l1 <- ee$FeatureCollection('FAO/GAUL/2015/level1')
+brazil_states <- gaul_l1$filterMetadata(
+  ee$String('ADM0_NAME'),
+  'equals',
+  ee$String('Brazil')
+)
+region <- brazil_states$bounds()
+
+# Create pixel area layer (in hectares)
+pixel_area <- ee$Image$pixelArea()$divide(10000)
+
+# Filter Hansen loss year to valid range (2001-2022 = years 1-22)
+hansen_lossyear_mask <- hansen_lossyear$gt(0)$And(hansen_lossyear$lte(22))
+hansen_lossyear_masked <- hansen_lossyear$updateMask(hansen_lossyear_mask)
+
+# Composite image for reduction: pixel_area, state, year, classification
+composite_for_reduction <- pixel_area$
+  addBands(brazil_states_raster$rename('state'))$
+  addBands(hansen_lossyear_masked$rename('year'))$
+  addBands(hansen_loss_attribution$rename('classification'))
+
+# Define grouped reducer: sum by state, year, and classification
+grouped_reducer <- ee$Reducer$sum()$
+  group(groupField = 1, groupName = 'state')$
+  group(groupField = 2, groupName = 'year')$
+  group(groupField = 3, groupName = 'class')
+
+cat("Executing reduceRegion (this may take a moment)...\n")
+
+reduction_result <- composite_for_reduction$reduceRegion(
+  reducer = grouped_reducer,
+  geometry = region,
+  scale = hansen_scale$getInfo(),
+  maxPixels = 1e13
+)
+
+cat("reduceRegion completed\n\n")
+
+# ============================================================================
+# SECTION 4: FLATTEN AND PROCESS RESULTS
+# ============================================================================
+
+cat("Processing results...\n")
+
+flatten_grouped_result <- function(result_info) {
+  result_list <- list()
+  
+  for (class_idx in seq_along(result_info$groups)) {
+    class_group <- result_info$groups[[class_idx]]
+    class_code <- class_group$class
+    
+    for (year_idx in seq_along(class_group$groups)) {
+      year_group <- class_group$groups[[year_idx]]
+      year_code <- year_group$year
+      
+      for (state_idx in seq_along(year_group$groups)) {
+        state_group <- year_group$groups[[state_idx]]
+        state_code <- state_group$state
+        area_hectares <- state_group$sum
+        
+        result_list[[length(result_list) + 1]] <- data.frame(
+          state_code = state_code,
+          year = year_code,
+          class_code = class_code,
+          area_hectares = area_hectares,
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+  }
+  
+  results_df <- do.call(rbind, result_list)
+  rownames(results_df) <- NULL
+  
+  return(results_df)
+}
+
+result_info <- reduction_result$getInfo()
+results_df <- tibble(flatten_grouped_result(result_info))
+print(results_df, n = 999)
+
+# Convert year codes (1-22) to actual years (2001-2022)
+results_df <- results_df %>%
+  mutate(
+    year = year + 2000,
+    state_name = STATE_CODE_TO_NAME[as.character(state_code)]
+  ) %>%
+  select(state_name, state_code, class_code, year, area_hectares)
+
+cat("Results processed\n")
+cat("Total rows: ", nrow(results_df), "\n")
+cat("Unique states: ", length(unique(results_df$state_name)), "\n")
+cat("Unique classes: ", length(unique(results_df$class_code)), "\n")
+cat("Year range: ", min(results_df$year), " - ", max(results_df$year), "\n\n")
+
+# ============================================================================
+# SECTION 5: PIVOT TO LONG FORMAT (YEARS AS COLUMNS)
+# ============================================================================
+
+cat("Pivoting to long format (years as columns)...\n")
+
+results_wide <- results_df %>%
+  pivot_wider(
+    id_cols = c(state_name, state_code, class_code),
+    names_from = year,
+    values_from = area_hectares,
+    values_fill = 0
+  ) %>%
+  arrange(state_name, class_code)
+
+cat("Pivot completed\n\n")
+
+# ============================================================================
+# SECTION 6: EXPORT TO CSV
+# ============================================================================
+
+# Create output directory if it doesn't exist
+if (!dir.exists(OUTPUT_DIR)) {
+  dir.create(OUTPUT_DIR, recursive = TRUE)
+}
+
+output_path <- file.path(OUTPUT_DIR, OUTPUT_FILENAME)
+
+write_csv(results_wide, output_path)
+
+cat("Export completed successfully!\n")
+cat("Output file: ", output_path, "\n")
+cat("Dimensions: ", nrow(results_wide), " rows × ", ncol(results_wide), " columns\n\n")
+
+# ============================================================================
+# SECTION 7: SUMMARY STATISTICS
+# ============================================================================
+
+cat("=== SUMMARY STATISTICS ===\n\n")
+
+cat("Total area (all states, all commodities, all years): ", 
+    sum(results_df$area_hectares, na.rm = TRUE), " hectares\n\n")
+
+# Summary by state
+state_summary <- results_df %>%
+  group_by(state_name) %>%
+  summarise(
+    total_area_ha = sum(area_hectares, na.rm = TRUE),
+    n_commodities = n_distinct(class_code),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(total_area_ha))
+
+cat("Top 10 states by total area:\n")
+print(head(state_summary, 10))
+cat("\n")
+
+# Summary by commodity
+commodity_summary <- results_df %>%
+  group_by(class_code) %>%
+  summarise(
+    total_area_ha = sum(area_hectares, na.rm = TRUE),
+    n_states = n_distinct(state_name),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(total_area_ha))
+
+cat("Top 15 commodities by total area:\n")
+print(head(commodity_summary, 15))
+cat("\n")
+
+cat("Export complete. Data ready for analysis.\n")
